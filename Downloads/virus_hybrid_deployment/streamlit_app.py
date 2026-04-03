@@ -10,7 +10,7 @@ from PIL import Image
 import os
 
 # ==============================================================
-# 🦠 MODEL ARCHITECTURE (Must match Kaggle exactly)
+# 🦠 MODEL ARCHITECTURE
 # ==============================================================
 class ChannelAttention(nn.Module):
     def __init__(self, channels, reduction=16):
@@ -83,15 +83,12 @@ def load_system():
         dropout=meta['dropout_rate']
     )
     
-    # Load weights with security fix for PyTorch 2.6+
     checkpoint = torch.load('best_virus_model.pth', map_location='cpu', weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
-    
     return model, meta
 
 def process_image(uploaded_file, target_size):
-    # Support for .tif and standard formats
     if uploaded_file.name.lower().endswith(('.tif', '.tiff')):
         img = tifffile.imread(uploaded_file)
     else:
@@ -100,15 +97,12 @@ def process_image(uploaded_file, target_size):
 
     if img is None: return None, None
     
-    # Standardize to grayscale uint8
     if len(img.shape) == 3:
         img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     if img.dtype != np.uint8:
         img = ((img - img.min()) / (img.max() - img.min() + 1e-8) * 255).astype(np.uint8)
     
     raw_gray = img.copy()
-    
-    # Preprocessing for Engine 1 (DL)
     img_resized = cv2.resize(img, (target_size, target_size))
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     img_clahe = clahe.apply(img_resized)
@@ -119,11 +113,11 @@ def process_image(uploaded_file, target_size):
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
     tensor = transform(Image.fromarray(img_rgb)).unsqueeze(0)
-    
     return tensor, raw_gray
 
 def engine_2_count(img_gray, min_area, max_area):
-    img_blur = cv2.GaussianBlur(cv2.resize(img_gray, (256, 256)), (5, 5), 0)
+    img_base = cv2.resize(img_gray, (256, 256))
+    img_blur = cv2.GaussianBlur(img_base, (5, 5), 0)
     thresh_type = cv2.THRESH_BINARY_INV if img_blur.mean() > 127 else cv2.THRESH_BINARY
     binary = cv2.adaptiveThreshold(img_blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, thresh_type, 21, 5)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
@@ -132,7 +126,7 @@ def engine_2_count(img_gray, min_area, max_area):
     
     n_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary)
     count = 0
-    annotated = cv2.cvtColor(cv2.resize(img_gray, (256, 256)), cv2.COLOR_GRAY2BGR)
+    annotated = cv2.cvtColor(img_base, cv2.COLOR_GRAY2BGR)
     
     for i in range(1, n_labels):
         if min_area <= stats[i, cv2.CC_STAT_AREA] <= max_area:
@@ -185,7 +179,7 @@ with col2:
             dens_score = min(count / config['density_cap'], 1.0)
             sev_score = (bsl_w * config['w_bsl']) + (dens_score * config['w_density'])
             
-            # Staging
+            # Staging (Indentation Check)
             if sev_score < config['mild_threshold']: 
                 stage, color = "Stage 1: MILD", "#27ae60"
             elif sev_score < config['high_threshold']: 
@@ -195,17 +189,13 @@ with col2:
 
         # RESULTS DASHBOARD
         st.subheader("🩺 Diagnostic Results")
-        
-        # Identity Card
         st.metric(label="Predicted Pathogen", value=meta['display_names'].get(virus_key.lower(), virus_key))
         
-        # Metric Row
         m1, m2, m3 = st.columns(3)
         m1.metric("BSL Level", f"Level {bsl}")
         m2.metric("Particle Count (N)", count)
-        m3.metric("Engine 1 Conf.", f"{conf.item()*100:.1f}%")
+        m3.metric("Confidence", f"{conf.item()*100:.1f}%")
 
-        # Severity Score
         st.markdown(f"""
         <div style="background-color:{color}; padding:20px; border-radius:10px; text-align:center;">
             <h2 style="color:white; margin:0;">{stage}</h2>
@@ -216,13 +206,14 @@ with col2:
         with st.expander("Formula Breakdown"):
             st.write(f"**Species Factor:** BSL-{bsl} weight ({bsl_w}) × {config['w_bsl']} = {bsl_w*config['w_bsl']:.3f}")
             st.write(f"**Load Factor:** Density Score ({dens_score:.3f}) × {config['w_density']} = {dens_score*config['w_density']:.3f}")
-            st.write(f"**Total:** {sev_score:.4f}")
+            st.write(f"**Total Score:** {sev_score:.4f}")
 
         st.subheader("🔍 Engine 2 Visualization")
         st.image(annotated, caption=f"Blob Detection (Found N={count})", use_container_width=True)
 
-else:
-    st.info("Please upload a TEM micrograph to begin analysis.")
+    else:
+        st.info("Please upload a TEM micrograph to begin analysis.")
 
+# Footer outside of the image-logic blocks
 st.markdown("---")
 st.caption("TEM Hybrid Suite | Engine 1: MobileNetV2-CBAM-BiGRU | Engine 2: CV Blob Counter")
